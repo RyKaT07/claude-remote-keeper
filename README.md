@@ -83,14 +83,45 @@ Make sure `~/.local/bin` is on your `PATH`.
 ## Usage
 
 ```bash
-rc up [name]      # register the current dir (+ a UUID) and start it in Remote Control now
-rc down [name]    # stop the tmux session and unregister it
-rc ls             # list desired sessions: live? + short UUID + dir
-rc attach [name]  # attach to the tmux session locally (Ctrl-b d to detach)
-rc reconcile      # run the reconciler once (normally automatic)
+rc up [name]        # register cwd + start in Remote Control (interactive picker if past convos exist)
+rc up --new [name]  # always start a FRESH conversation (skip the picker)
+rc pick [name]      # interactively choose a past conversation in cwd to (re)attach
+rc down [name]      # stop the tmux session and unregister it
+rc ls               # list desired sessions: live? + short UUID + dir
+rc attach [name]    # attach to the tmux session locally (Ctrl-b d to detach)
+rc reconcile        # run the reconciler once (normally automatic)
 ```
 
 `name` defaults to the current folder's name. Then open the **Claude app** or **claude.ai/code** and your session is in the list.
+
+### Picking an existing conversation
+
+A session is `name → directory → conversation UUID`. When you run `rc up` (or `rc pick`) in a folder that already has past Claude conversations, you get an interactive picker — [`fzf`](https://github.com/junegunn/fzf) if installed, otherwise a numbered menu — listing each past conversation with its date and a one-line preview, plus a **"start a NEW conversation"** option on top. Whatever you choose is pinned to that name, so it's the one that resumes after every reboot.
+
+```
+pick conversation in Energy Infra >
+  ✨ start a NEW conversation
+  b9142ed1  2026-06-11 23:32  Fix the RAUC update rollout
+  7a5ec26d  2026-06-11 23:29  RTM connector retry logic
+  70cbd424  2026-06-11 23:29  worker-infra prod deploy
+```
+
+### Multiple sessions in one folder
+
+`rc` keys sessions by **name**, not by folder — so several can live in the same directory. Give each a distinct name:
+
+```bash
+cd ~/code/energy-infra
+rc up "RAUC update"            # one conversation
+rc up "RTM connector manager"  # another, same folder
+rc pick "worker prod"          # bind a third to a specific past conversation
+```
+
+Each name maps to exactly one conversation UUID. `rc up` with no name uses the folder name, so running it twice in the same folder refers to the *same* session.
+
+### Shell completion
+
+`install.sh` installs bash completion (session names complete for `rc down` / `rc attach`). Open a new shell, or `source ~/.local/share/bash-completion/completions/rc`.
 
 ## Notes & limitations
 

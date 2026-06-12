@@ -29,6 +29,12 @@ install -m 0644 "$SRC/systemd/claude-rc-reconcile.service" "$UNIT/claude-rc-reco
 install -m 0644 "$SRC/systemd/claude-rc-reconcile.timer"   "$UNIT/claude-rc-reconcile.timer"
 [ -f "$CONF/desired" ] || { install -m 0644 "$SRC/examples/desired.example" "$CONF/desired"; echo "    created $CONF/desired"; }
 
+# bash tab-completion (loaded automatically by the bash-completion package)
+COMPL="$HOME/.local/share/bash-completion/completions"
+mkdir -p "$COMPL"
+install -m 0644 "$SRC/completions/rc.bash" "$COMPL/rc"
+echo "    installed bash completion (open a new shell, or: source $COMPL/rc)"
+
 # --- enable services ---------------------------------------------------------
 systemctl --user daemon-reload
 systemctl --user enable --now claude-rc-reconcile.timer
