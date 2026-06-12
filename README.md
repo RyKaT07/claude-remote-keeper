@@ -85,10 +85,11 @@ Make sure `~/.local/bin` is on your `PATH`.
 ```bash
 rc up [name]        # register cwd + start in Remote Control (interactive picker if past convos exist)
 rc up --new [name]  # always start a FRESH conversation (skip the picker)
-rc pick [name]      # interactively choose a past conversation in cwd to (re)attach
+rc pick [name]      # re-point a session to a different past conversation in cwd
 rc down [name]      # stop the tmux session and unregister it
 rc ls               # list desired sessions: live? + short UUID + dir
-rc attach [name]    # attach to the tmux session locally (Ctrl-b d to detach)
+rc attach [name]    # attach to a live session; no name = pick from a list (Ctrl-b d to detach)
+rc sync             # capture each live session's current conversation into desired
 rc reconcile        # run the reconciler once (normally automatic)
 ```
 

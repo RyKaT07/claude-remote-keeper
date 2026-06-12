@@ -7,10 +7,10 @@
 #   rc up [name]      register cwd + start in RC. If the name is new and the folder
 #                     has past conversations, interactively pick one (or start fresh).
 #   rc up --new [name]  always start a fresh conversation (no picker)
-#   rc pick [name]    interactively choose a past conversation in cwd to (re)attach
+#   rc pick [name]    re-point a session to a different past conversation in cwd
 #   rc down [name]    stop the tmux session and unregister (default: cwd folder name)
 #   rc ls             list desired sessions: live state + UUID + dir
-#   rc attach [name]  attach locally to inspect (Ctrl-b d to detach)
+#   rc attach [name]  attach to a live session locally; no name = pick from a list (Ctrl-b d detaches)
 #   rc sync           capture each live session's CURRENT conversation into desired
 #   rc reconcile      run the reconciler once (normally automatic)
 set -euo pipefail
@@ -182,9 +182,37 @@ cmd_ls() {
   done < "$DESIRED"
 }
 
+# Interactively choose a live tmux session. Echoes the chosen name, returns 1 on
+# cancel / none.
+pick_live_session() {
+  local live
+  live="$(tmux list-sessions -F '#S' 2>/dev/null | sort)"
+  [[ -z "$live" ]] && { echo "rc: no live sessions" >&2; return 1; }
+  if command -v fzf >/dev/null 2>&1; then
+    printf '%s\n' "$live" | fzf --height=40% --reverse --prompt="attach to > " || return 1
+  else
+    local -a arr; mapfile -t arr <<< "$live"
+    local i choice
+    for i in "${!arr[@]}"; do printf '  %2d) %s\n' "$i" "${arr[$i]}" >&2; done
+    read -rp "Attach to [0-$((${#arr[@]}-1))]: " choice </dev/tty || return 1
+    [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${arr[$choice]:-}"
+  fi
+}
+
 cmd_attach() {
-  local name="${1:-$(basename "$(pwd -P)")}"
-  tmux has-session -t "=$name" 2>/dev/null || die "no live session '$name' (try: rc up)"
+  local name="${1:-}"
+  if [[ -z "$name" ]]; then
+    local live; live="$(tmux list-sessions -F '#S' 2>/dev/null)"
+    [[ -z "$live" ]] && die "no live sessions (rc up to start one)"
+    if [[ "$(printf '%s\n' "$live" | grep -c .)" -eq 1 ]]; then
+      name="$live"                       # only one live -> attach straight away
+    else
+      name="$(pick_live_session)" || { echo "rc attach: cancelled"; return 1; }
+    fi
+    [[ -z "$name" ]] && return 1
+  fi
+  tmux has-session -t "=$name" 2>/dev/null || die "no live session '$name' (rc ls to see them)"
   exec tmux attach -t "=$name"
 }
 
