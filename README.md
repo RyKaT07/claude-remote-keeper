@@ -1,6 +1,6 @@
-# claude-rc
+# claude-remote-keeper
 
-**Keep [Claude Code](https://claude.com/claude-code) Remote Control sessions alive across crashes, network drops, and reboots — and resume the _same conversation_ each time.**
+**Keep [Claude Code](https://claude.com/claude-code) Remote Control sessions alive across crashes, network drops, and reboots — and resume the _same conversation_ each time.** (The CLI you use is called `rc`.)
 
 Claude Code's [Remote Control](https://code.claude.com/docs/en/remote-control) lets you drive a local session from the Claude mobile app or `claude.ai/code`. It's great — until the machine reboots, the network blips, or the process exits. Then:
 
@@ -71,8 +71,8 @@ These cost real debugging time; both are baked into the shipped systemd unit:
 ## Install
 
 ```bash
-git clone https://github.com/RyKaT07/claude-rc.git
-cd claude-rc
+git clone https://github.com/RyKaT07/claude-remote-keeper.git
+cd claude-remote-keeper
 ./install.sh
 ```
 
