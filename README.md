@@ -119,6 +119,15 @@ rc pick "worker prod"          # bind a third to a specific past conversation
 
 Each name maps to exactly one conversation UUID. `rc up` with no name uses the folder name, so running it twice in the same folder refers to the *same* session.
 
+### Changing which conversation a session runs
+
+A session's conversation is pinned by UUID, so it resumes the same chat every restart. Two ways to point a session at a different conversation:
+
+- **Deliberately:** `rc pick "name"` — choose another past conversation from the picker. It updates the desired file and restarts the session on it.
+- **By hand:** if you `rc attach` and switch with `/resume` inside the session, the reconciler **auto-captures** the conversation you're now on back into the desired file within ~30s (or run `rc sync` to do it immediately). Without this, a manual switch would silently revert to the old pinned UUID on the next restart or reboot.
+
+> **Note:** `/exit` inside a session does **not** stop it — the supervisor loop restarts `claude` ~10s later (that's the whole point). To actually stop a session, use `rc down "name"`.
+
 ### Shell completion
 
 `install.sh` installs bash completion (session names complete for `rc down` / `rc attach`). Open a new shell, or `source ~/.local/share/bash-completion/completions/rc`.

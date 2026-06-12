@@ -3,7 +3,7 @@
 _rc_complete() {
   local cur subcmds desired names IFS
   cur="${COMP_WORDS[COMP_CWORD]}"
-  subcmds="up pick down ls attach reconcile help"
+  subcmds="up pick down ls attach sync reconcile help"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )

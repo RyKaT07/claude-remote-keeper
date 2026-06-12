@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# claude-rc-reconcile — ensure every DESIRED session has a tmux session running
-# the supervisor loop (claude-rc-loop). The loop keeps claude --remote-control
-# alive; reconcile only (re)creates a whole tmux session that is MISSING — e.g.
-# after a reboot. NEVER kills anything.
+# claude-rc-reconcile — keep desired Claude remote-control sessions in sync.
+#
+# Two passes:
+#   1. SYNC   — for each live RC session, capture the conversation it is CURRENTLY
+#               on (e.g. after a manual /resume) back into the desired file, so the
+#               switch survives the next restart / reboot.
+#   2. ENSURE — (re)create any desired session whose tmux session is MISSING
+#               (e.g. after a reboot). Never kills anything.
 #
 # Desired state: ~/.config/claude-rc/desired   ("name|dir|uuid" per line, # = comment)
 # Run by:        claude-rc-reconcile.timer (systemd --user) + on boot.
@@ -15,9 +19,44 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:/usr/local/bi
 
 [[ -f "$DESIRED" ]] || exit 0
 
+# upsert "name|dir|uuid" keyed by exact name
+_upsert() {
+  local name="$1" dir="$2" uuid="$3" tmp
+  tmp="$(mktemp)"
+  awk -F'|' -v n="$name" -v d="$dir" -v u="$uuid" '$1==n{next}{print}END{print n"|"d"|"u}' "$DESIRED" > "$tmp"
+  mv "$tmp" "$DESIRED"
+}
+
+# --- pass 1: capture manual conversation switches ---------------------------
+# For each live `claude --remote-control NAME ...`, read its current sessionId and
+# re-pin it in desired if it changed (captures a /resume you did by hand).
+sync_live_sessions() {
+  local j pid sid name dir pinned i
+  local -a argv
+  for j in "$HOME"/.claude/sessions/*.json; do
+    [[ -e "$j" ]] || continue
+    pid="$(basename "$j" .json)"
+    [[ -r "/proc/$pid/cmdline" ]] || continue
+    mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || continue
+    name=""
+    for ((i=0; i<${#argv[@]}; i++)); do
+      [[ "${argv[i]}" == "--remote-control" ]] && { name="${argv[i+1]:-}"; break; }
+    done
+    [[ -z "$name" ]] && continue
+    sid="$(grep -ao '"sessionId":"[^"]*"' "$j" 2>/dev/null | head -1 | sed 's/.*:"//; s/"$//')"
+    [[ -z "$sid" ]] && continue
+    pinned="$(awk -F'|' -v n="$name" '$1==n{print $3; exit}' "$DESIRED")"
+    dir="$(awk -F'|' -v n="$name" '$1==n{print $2; exit}' "$DESIRED")"
+    [[ -z "$dir" ]] && continue            # name not in desired -> not ours to track
+    [[ "$pinned" == "$sid" ]] && continue  # already up to date
+    _upsert "$name" "$dir" "$sid"
+    echo "[reconcile] sync '$name': re-pinned ${pinned:0:8} -> ${sid:0:8} (current conversation captured)"
+  done
+}
+
+# --- pass 2: recreate missing sessions --------------------------------------
 # 0 if some LIVE claude process already owns this conversation UUID — so we don't
-# duplicate it or hang on the "continue or start new?" prompt (e.g. a session you
-# are actively using right now in a plain `claude`).
+# duplicate it or hang on the "continue or start new?" prompt.
 uuid_is_live() {
   local u="$1"; [[ -z "$u" ]] && return 1
   grep -Flq "\"sessionId\":\"$u\"" "$HOME"/.claude/sessions/*.json 2>/dev/null
@@ -31,8 +70,7 @@ ensure_one() {
     echo "[reconcile] skip '$name': dir gone ($dir)"
     return 0
   fi
-  # "=$name" forces an EXACT match (tmux prefix-matches otherwise, and there are
-  # commonly near-duplicate names).
+  # "=$name" forces an EXACT match (tmux prefix-matches otherwise).
   if tmux has-session -t "=$name" 2>/dev/null; then
     return 0   # already alive — the loop inside keeps it up; leave it
   fi
@@ -43,6 +81,8 @@ ensure_one() {
   echo "[reconcile] (re)start '$name' -> $dir (uuid=${uuid:-none})"
   tmux new-session -d -s "$name" -c "$dir" "$LOOP \"$name\" \"$dir\" \"$uuid\""
 }
+
+sync_live_sessions
 
 while IFS='|' read -r name dir uuid; do
   ensure_one "$name" "$dir" "${uuid:-}"

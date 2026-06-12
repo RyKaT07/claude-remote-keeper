@@ -11,6 +11,7 @@
 #   rc down [name]    stop the tmux session and unregister (default: cwd folder name)
 #   rc ls             list desired sessions: live state + UUID + dir
 #   rc attach [name]  attach locally to inspect (Ctrl-b d to detach)
+#   rc sync           capture each live session's CURRENT conversation into desired
 #   rc reconcile      run the reconciler once (normally automatic)
 set -euo pipefail
 
@@ -187,15 +188,15 @@ cmd_attach() {
   exec tmux attach -t "=$name"
 }
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
-  up)        shift; cmd_up "$@";;
-  pick)      shift; cmd_pick "$@";;
-  down)      shift; cmd_down "$@";;
-  ls|list)   cmd_ls;;
-  attach|a)  shift; cmd_attach "$@";;
-  reconcile) exec "$RECONCILE";;
+  up)             shift; cmd_up "$@";;
+  pick)           shift; cmd_pick "$@";;
+  down)           shift; cmd_down "$@";;
+  ls|list)        cmd_ls;;
+  attach|a)       shift; cmd_attach "$@";;
+  sync|reconcile) exec "$RECONCILE";;
   ""|-h|--help|help) usage;;
   *) die "unknown command '$1' (try: rc --help)";;
 esac
