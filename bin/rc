@@ -7,7 +7,8 @@
 #   rc up [name]      register cwd + start in RC. If the name is new and the folder
 #                     has past conversations, interactively pick one (or start fresh).
 #   rc up --new [name]  always start a fresh conversation (no picker)
-#   rc pick [name]    re-point a session to a different past conversation in cwd
+#   rc pick [name]    re-point a session to another past conversation
+#                     (no name: pick the session from a list first, then the chat)
 #   rc down [name]    stop the tmux session and unregister (default: cwd folder name)
 #   rc ls             list desired sessions: live state + UUID + dir
 #   rc attach [name]  attach to a live session locally; no name = pick from a list (Ctrl-b d detaches)
@@ -148,12 +149,46 @@ cmd_up() {
   _start_now "$name"
 }
 
+# Interactively choose a registered session. Echoes "name|dir", returns 1 on
+# cancel / none. Auto-selects when there is only one.
+pick_session_from_desired() {
+  local -a keys=() disp=()
+  local name dir uuid i
+  while IFS='|' read -r name dir uuid; do
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    keys+=("$name|$dir")
+    disp+=("$(printf '%-22s %-10s %s' "$name" "${uuid:0:8}" "$dir")")
+  done < "$DESIRED"
+  [[ ${#keys[@]} -eq 0 ]] && { echo "rc: no registered sessions (rc up first)" >&2; return 1; }
+  [[ ${#keys[@]} -eq 1 ]] && { printf '%s\n' "${keys[0]}"; return 0; }
+  if command -v fzf >/dev/null 2>&1; then
+    local tsv="" sel
+    for i in "${!keys[@]}"; do tsv+="${disp[$i]}"$'\t'"${keys[$i]}"$'\n'; done
+    sel="$(printf '%s' "$tsv" | fzf --with-nth=1 --delimiter='\t' --height=45% --reverse --prompt='pick session > ')" || return 1
+    [[ -z "$sel" ]] && return 1
+    printf '%s\n' "${sel#*$'\t'}"
+  else
+    local choice
+    for i in "${!disp[@]}"; do printf '  %2d) %s\n' "$i" "${disp[$i]}" >&2; done
+    read -rp "Session [0-$((${#keys[@]}-1))]: " choice </dev/tty || return 1
+    [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${keys[$choice]:-}"
+  fi
+}
+
 cmd_pick() {
-  local dir name uuid
-  dir="$(pwd -P)"
-  name="${1:-$(basename "$dir")}"
-  case "$name" in *'|'*) die "name cannot contain '|'";; esac
-  [[ -n "$(_convo_rows "$dir")" ]] || die "no past conversations found in $dir (use: rc up)"
+  local name dir uuid sel
+  if [[ -n "${1:-}" ]]; then
+    name="$1"
+    case "$name" in *'|'*) die "name cannot contain '|'";; esac
+    dir="$(awk -F'|' -v n="$name" '$1==n{print $2; exit}' "$DESIRED")"
+    [[ -z "$dir" ]] && dir="$(pwd -P)"
+  else
+    sel="$(pick_session_from_desired)" || { echo "rc pick: cancelled"; return 1; }
+    [[ -z "$sel" ]] && return 1
+    name="${sel%%|*}"; dir="${sel#*|}"
+  fi
+  [[ -n "$(_convo_rows "$dir")" ]] || die "no past conversations in $dir (use: rc up --new \"$name\")"
   uuid="$(pick_convo "$dir")" || { echo "rc pick: cancelled"; return 1; }
   [[ -z "$uuid" ]] && uuid="$(uuidgen)"
   register "$name" "$dir" "$uuid"

@@ -11,7 +11,7 @@ _rc_complete() {
   fi
 
   case "${COMP_WORDS[1]}" in
-    down|attach|a)
+    down|attach|a|pick)
       # complete with registered session names (spaces escaped)
       desired="${CLAUDE_RC_DESIRED:-$HOME/.config/claude-rc/desired}"
       names="$(awk -F'|' '$1!="" && $1 !~ /^#/ {print $1}' "$desired" 2>/dev/null)"
