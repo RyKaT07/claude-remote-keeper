@@ -1,0 +1,19 @@
+[Unit]
+Description=Reconcile Claude remote-control tmux sessions (ensure all desired are live)
+# Also runs once at startup to restore everything after a reboot.
+
+[Service]
+Type=oneshot
+# KillMode=process is LOAD-BEARING: this is a oneshot, so without it systemd tears
+# down the cgroup when the script exits and kills the tmux sessions it just spawned
+# (-> a restart loop every timer tick). With it, the spawned tmux server survives.
+KillMode=process
+# CLAUDE_TRUST_WORKSPACE=1 is LOAD-BEARING: otherwise the workspace-trust prompt
+# hangs unattended `claude --remote-control` under systemd (claude-code #53606).
+Environment=CLAUDE_TRUST_WORKSPACE=1
+ExecStart=%h/.local/bin/claude-rc-reconcile
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

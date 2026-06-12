@@ -1,0 +1,9 @@
+# Desired Claude remote-control sessions. One per line:  name|absolute_dir|uuid
+#
+# Normally you don't edit this by hand — use `rc up` from inside a project dir.
+# The UUID pins the conversation so the SAME chat resumes after a reboot.
+# Leave the uuid empty to start a fresh session each time.
+#
+# Examples:
+# my-api|/home/me/code/my-api|
+# infra notes|/home/me/code/infra|3f9a1c20-0000-4000-8000-000000000000

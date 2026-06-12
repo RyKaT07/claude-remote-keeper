@@ -1,0 +1,7 @@
+# Local state / user data — never commit
+desired
+last-sessions
+*.bak
+*.bak-*
+*.log
+*.tmp

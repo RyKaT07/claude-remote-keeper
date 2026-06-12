@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# claude-rc-reconcile — ensure every DESIRED session has a tmux session running
+# the supervisor loop (claude-rc-loop). The loop keeps claude --remote-control
+# alive; reconcile only (re)creates a whole tmux session that is MISSING — e.g.
+# after a reboot. NEVER kills anything.
+#
+# Desired state: ~/.config/claude-rc/desired   ("name|dir|uuid" per line, # = comment)
+# Run by:        claude-rc-reconcile.timer (systemd --user) + on boot.
+set -u
+
+DESIRED="${CLAUDE_RC_DESIRED:-$HOME/.config/claude-rc/desired}"
+LOOP="$HOME/.local/bin/claude-rc-loop"
+export CLAUDE_TRUST_WORKSPACE=1
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+[[ -f "$DESIRED" ]] || exit 0
+
+# 0 if some LIVE claude process already owns this conversation UUID — so we don't
+# duplicate it or hang on the "continue or start new?" prompt (e.g. a session you
+# are actively using right now in a plain `claude`).
+uuid_is_live() {
+  local u="$1"; [[ -z "$u" ]] && return 1
+  grep -Flq "\"sessionId\":\"$u\"" "$HOME"/.claude/sessions/*.json 2>/dev/null
+}
+
+ensure_one() {
+  local name="$1" dir="$2" uuid="$3"
+  [[ -z "$name" || -z "$dir" ]] && return 0
+  [[ "$name" == \#* ]] && return 0
+  if [[ ! -d "$dir" ]]; then
+    echo "[reconcile] skip '$name': dir gone ($dir)"
+    return 0
+  fi
+  # "=$name" forces an EXACT match (tmux prefix-matches otherwise, and there are
+  # commonly near-duplicate names).
+  if tmux has-session -t "=$name" 2>/dev/null; then
+    return 0   # already alive — the loop inside keeps it up; leave it
+  fi
+  if uuid_is_live "$uuid"; then
+    echo "[reconcile] skip '$name': uuid $uuid already live in another process"
+    return 0
+  fi
+  echo "[reconcile] (re)start '$name' -> $dir (uuid=${uuid:-none})"
+  tmux new-session -d -s "$name" -c "$dir" "$LOOP \"$name\" \"$dir\" \"$uuid\""
+}
+
+while IFS='|' read -r name dir uuid; do
+  ensure_one "$name" "$dir" "${uuid:-}"
+done < "$DESIRED"
+
+exit 0

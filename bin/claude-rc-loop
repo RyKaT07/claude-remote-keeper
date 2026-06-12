@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# claude-rc-loop NAME DIR [UUID]
+#
+# Supervisor loop, run INSIDE a tmux session (one per Claude session). Keeps a
+# Claude Code remote-control session alive forever: restarts on crash, on the
+# ~10min network-timeout exit, or any auth blip. The tmux session itself never
+# dies because this loop outlives the claude process.
+#
+# UUID pins the conversation so the SAME chat comes back after a reboot:
+#   - transcript exists  -> claude --remote-control "NAME" --resume UUID
+#   - no transcript yet  -> claude --remote-control "NAME" --session-id UUID (pins it)
+#   - no UUID            -> fresh remote-control session
+set -u
+
+name="${1:?usage: claude-rc-loop NAME DIR [UUID]}"
+dir="${2:?dir required}"
+uuid="${3:-}"
+
+# Bypass the workspace-trust prompt that otherwise hangs unattended RC startup
+# under systemd (claude-code issue #53606, affects 2.1.119+).
+export CLAUDE_TRUST_WORKSPACE=1
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+CLAUDE="$(command -v claude || true)"
+[[ -z "$CLAUDE" ]] && { echo "[rc-loop] $name: 'claude' not found on PATH — idling"; exec sleep 3600; }
+
+cd "$dir" 2>/dev/null || { echo "[rc-loop] $name: dir gone ($dir) — idling"; exec sleep 3600; }
+
+transcript_exists() { compgen -G "$HOME/.claude/projects/*/$1.jsonl" >/dev/null 2>&1; }
+
+while true; do
+  if [[ -n "$uuid" ]] && transcript_exists "$uuid"; then
+    echo "[rc-loop] $name: start (--resume $uuid)"
+    "$CLAUDE" --remote-control "$name" --resume "$uuid" || true
+  elif [[ -n "$uuid" ]]; then
+    echo "[rc-loop] $name: start (--session-id $uuid, new pinned)"
+    "$CLAUDE" --remote-control "$name" --session-id "$uuid" || true
+  else
+    echo "[rc-loop] $name: start (fresh)"
+    "$CLAUDE" --remote-control "$name" || true
+  fi
+  echo "[rc-loop] $name: claude exited, restart in 10s…"
+  sleep 10
+done
