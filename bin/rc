@@ -9,7 +9,7 @@
 #   rc up --new [name]  always start a fresh conversation (no picker)
 #   rc pick [name]    re-point a session to another past conversation
 #                     (no name: pick the session from a list first, then the chat)
-#   rc down [name]    stop the tmux session and unregister (default: cwd folder name)
+#   rc down [name]    stop & unregister; no name = pick from a list (Tab = multi-select with fzf)
 #   rc ls             list desired sessions: live state + UUID + dir
 #   rc attach [name]  attach to a live session locally; no name = pick from a list (Ctrl-b d detaches)
 #   rc sync           capture each live session's CURRENT conversation into desired
@@ -196,8 +196,8 @@ cmd_pick() {
   _start_now "$name"
 }
 
-cmd_down() {
-  local name="${1:-$(basename "$(pwd -P)")}"
+_down_one() {
+  local name="$1"
   unregister "$name"
   if tmux has-session -t "=$name" 2>/dev/null; then
     tmux kill-session -t "=$name"
@@ -205,6 +205,36 @@ cmd_down() {
   else
     echo "rc down: '$name' unregistered (was not live)"
   fi
+}
+
+cmd_down() {
+  if [[ -n "${1:-}" ]]; then _down_one "$1"; return; fi
+  # no name -> pick which registered session(s) to stop
+  local rows="" name dir uuid
+  while IFS='|' read -r name dir uuid; do
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    rows+="$(printf '%-24s %-10s %s' "$name" "${uuid:0:8}" "$dir")"$'\t'"$name"$'\n'
+  done < "$DESIRED"
+  [[ -z "$rows" ]] && die "no registered sessions"
+  local -a chosen=()
+  if command -v fzf >/dev/null 2>&1; then
+    local sel line
+    sel="$(printf '%s' "$rows" | fzf --multi --with-nth=1 --delimiter='\t' --height=50% --reverse \
+            --prompt='down (Tab=mark many, Enter=confirm) > ')" || { echo "rc down: cancelled"; return 1; }
+    [[ -z "$sel" ]] && { echo "rc down: nothing selected"; return 0; }
+    while IFS= read -r line; do chosen+=("${line#*$'\t'}"); done <<< "$sel"
+  else
+    local -a keys=() disp=()
+    local d k i input tok
+    while IFS=$'\t' read -r d k; do disp+=("$d"); keys+=("$k"); done < <(printf '%s' "$rows")
+    for i in "${!disp[@]}"; do printf '  %2d) %s\n' "$i" "${disp[$i]}" >&2; done
+    read -rp "Down which? (numbers, space/comma separated): " input </dev/tty || return 1
+    for tok in ${input//,/ }; do
+      if [[ "$tok" =~ ^[0-9]+$ ]]; then chosen+=("${keys[$tok]}"); fi
+    done
+  fi
+  [[ ${#chosen[@]} -eq 0 ]] && { echo "rc down: nothing selected"; return 0; }
+  for name in "${chosen[@]}"; do _down_one "$name"; done
 }
 
 cmd_ls() {

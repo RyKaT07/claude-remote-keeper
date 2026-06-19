@@ -86,7 +86,7 @@ Make sure `~/.local/bin` is on your `PATH`.
 rc up [name]        # register cwd + start in Remote Control (interactive picker if past convos exist)
 rc up --new [name]  # always start a FRESH conversation (skip the picker)
 rc pick [name]      # re-point a session to a different past conversation in cwd
-rc down [name]      # stop the tmux session and unregister it
+rc down [name]      # stop & unregister; no name = pick from a list (Tab = multi-select)
 rc ls               # list desired sessions: live? + short UUID + dir
 rc attach [name]    # attach to a live session; no name = pick from a list (Ctrl-b d to detach)
 rc sync             # capture each live session's current conversation into desired
