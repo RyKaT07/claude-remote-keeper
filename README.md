@@ -100,11 +100,11 @@ rc reconcile        # run the reconciler once (normally automatic)
 A session is `name → directory → conversation UUID`. When you run `rc up` (or `rc pick`) in a folder that already has past Claude conversations, you get an interactive picker — [`fzf`](https://github.com/junegunn/fzf) if installed, otherwise a numbered menu — listing each past conversation with its date and a one-line preview, plus a **"start a NEW conversation"** option on top. Whatever you choose is pinned to that name, so it's the one that resumes after every reboot.
 
 ```
-pick conversation in Energy Infra >
+pick conversation in InfraStructure >
   ✨ start a NEW conversation
-  b9142ed1  2026-06-11 23:32  Fix the RAUC update rollout
-  7a5ec26d  2026-06-11 23:29  RTM connector retry logic
-  70cbd424  2026-06-11 23:29  worker-infra prod deploy
+  b9142ed1  2026-06-11 23:32  Fix the update rollout
+  7a5ec26d  2026-06-11 23:29  retry logic
+  70cbd424  2026-06-11 23:29  prod deploy
 ```
 
 ### Multiple sessions in one folder
@@ -114,7 +114,7 @@ pick conversation in Energy Infra >
 ```bash
 cd ~/code/energy-infra
 rc up "RAUC update"            # one conversation
-rc up "RTM connector manager"  # another, same folder
+rc up "Agent manager"  # another, same folder
 rc pick "worker prod"          # bind a third to a specific past conversation
 ```
 
