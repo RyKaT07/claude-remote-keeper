@@ -58,8 +58,16 @@ sync_live_sessions() {
 # 0 if some LIVE claude process already owns this conversation UUID — so we don't
 # duplicate it or hang on the "continue or start new?" prompt.
 uuid_is_live() {
-  local u="$1"; [[ -z "$u" ]] && return 1
-  grep -Flq "\"sessionId\":\"$u\"" "$HOME"/.claude/sessions/*.json 2>/dev/null
+  local u="$1" j pid; [[ -z "$u" ]] && return 1
+  for j in "$HOME"/.claude/sessions/*.json; do
+    [[ -e "$j" ]] || continue
+    pid="$(basename "$j" .json)"
+    # ponytail: skip stale jsons — pid dead or recycled to a non-claude proc
+    # (e.g. code-server reused the pid) would otherwise read as a false "live".
+    [[ -r "/proc/$pid/cmdline" ]] && grep -qa claude "/proc/$pid/cmdline" 2>/dev/null || continue
+    grep -Flq "\"sessionId\":\"$u\"" "$j" 2>/dev/null && return 0
+  done
+  return 1
 }
 
 ensure_one() {
