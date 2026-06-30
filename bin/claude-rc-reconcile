@@ -79,7 +79,7 @@ ensure_one() {
     return 0
   fi
   # "=$name" forces an EXACT match (tmux prefix-matches otherwise).
-  if tmux has-session -t "=$name" 2>/dev/null; then
+  if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then
     return 0   # already alive — the loop inside keeps it up; leave it
   fi
   if uuid_is_live "$uuid"; then
@@ -87,7 +87,7 @@ ensure_one() {
     return 0
   fi
   echo "[reconcile] (re)start '$name' -> $dir (uuid=${uuid:-none})"
-  tmux new-session -d -s "$name" -c "$dir" "$LOOP \"$name\" \"$dir\" \"$uuid\""
+  tmux -L claude-rc new-session -d -s "$name" -c "$dir" "$LOOP \"$name\" \"$dir\" \"$uuid\""
 }
 
 sync_live_sessions

@@ -117,13 +117,13 @@ pick_convo() {
 # ---- start / commands -------------------------------------------------------
 _start_now() {  # name — start it via reconcile if not already live
   local name="$1"
-  if tmux has-session -t "=$name" 2>/dev/null; then
+  if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then
     echo "rc: '$name' already live (remote-control)"
     return 0
   fi
   "$RECONCILE" >/dev/null 2>&1 || true
   sleep 1
-  if tmux has-session -t "=$name" 2>/dev/null; then
+  if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then
     echo "rc: '$name' is live in remote-control"
   else
     echo "rc: '$name' registered but tmux did not start — check: rc reconcile"
@@ -199,8 +199,8 @@ cmd_pick() {
 _down_one() {
   local name="$1"
   unregister "$name"
-  if tmux has-session -t "=$name" 2>/dev/null; then
-    tmux kill-session -t "=$name"
+  if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then
+    tmux -L claude-rc kill-session -t "=$name"
     echo "rc down: '$name' stopped & unregistered"
   else
     echo "rc down: '$name' unregistered (was not live)"
@@ -242,7 +242,7 @@ cmd_ls() {
   while IFS='|' read -r name dir uuid; do
     [[ -z "$name" || "$name" == \#* ]] && continue
     local live
-    if tmux has-session -t "=$name" 2>/dev/null; then live=yes; else live=no; fi
+    if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then live=yes; else live=no; fi
     printf '%-26s %-5s %-10s %s\n' "$name" "$live" "${uuid:0:8}" "$dir"
   done < "$DESIRED"
 }
@@ -251,7 +251,7 @@ cmd_ls() {
 # cancel / none.
 pick_live_session() {
   local live
-  live="$(tmux list-sessions -F '#S' 2>/dev/null | sort)"
+  live="$(tmux -L claude-rc list-sessions -F '#S' 2>/dev/null | sort)"
   [[ -z "$live" ]] && { echo "rc: no live sessions" >&2; return 1; }
   if command -v fzf >/dev/null 2>&1; then
     printf '%s\n' "$live" | fzf --height=40% --reverse --prompt="attach to > " || return 1
@@ -268,7 +268,7 @@ pick_live_session() {
 cmd_attach() {
   local name="${1:-}"
   if [[ -z "$name" ]]; then
-    local live; live="$(tmux list-sessions -F '#S' 2>/dev/null)"
+    local live; live="$(tmux -L claude-rc list-sessions -F '#S' 2>/dev/null)"
     [[ -z "$live" ]] && die "no live sessions (rc up to start one)"
     if [[ "$(printf '%s\n' "$live" | grep -c .)" -eq 1 ]]; then
       name="$live"                       # only one live -> attach straight away
@@ -277,8 +277,8 @@ cmd_attach() {
     fi
     [[ -z "$name" ]] && return 1
   fi
-  tmux has-session -t "=$name" 2>/dev/null || die "no live session '$name' (rc ls to see them)"
-  exec tmux attach -t "=$name"
+  tmux -L claude-rc has-session -t "=$name" 2>/dev/null || die "no live session '$name' (rc ls to see them)"
+  exec tmux -L claude-rc attach -t "=$name"
 }
 
 usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
