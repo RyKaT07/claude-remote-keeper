@@ -21,14 +21,17 @@ uuid="${3:-}"
 export CLAUDE_TRUST_WORKSPACE=1
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-CLAUDE="$(command -v claude || true)"
-[[ -z "$CLAUDE" ]] && { echo "[rc-loop] $name: 'claude' not found on PATH — idling"; exec sleep 3600; }
-
 cd "$dir" 2>/dev/null || { echo "[rc-loop] $name: dir gone ($dir) — idling"; exec sleep 3600; }
 
 transcript_exists() { compgen -G "$HOME/.claude/projects/*/$1.jsonl" >/dev/null 2>&1; }
 
 while true; do
+  # ponytail: resolve claude every iteration — a long-lived loop must survive
+  # claude being updated/moved (a path cached once goes stale and wedges forever).
+  CLAUDE="$(command -v claude || true)"
+  if [[ -z "$CLAUDE" ]]; then
+    echo "[rc-loop] $name: 'claude' not on PATH, retry in 10s"; sleep 10; continue
+  fi
   if [[ -n "$uuid" ]] && transcript_exists "$uuid"; then
     echo "[rc-loop] $name: start (--resume $uuid)"
     "$CLAUDE" --remote-control "$name" --resume "$uuid" || true
