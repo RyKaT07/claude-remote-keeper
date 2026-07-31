@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# claude-rc-reconcile — keep desired Claude remote-control sessions in sync.
+# claude-rc-reconcile — keep desired Claude sessions in sync.
 #
 # Two passes:
-#   1. SYNC   — for each live RC session, capture the conversation it is CURRENTLY
+#   1. SYNC   — for each live session, capture the conversation it is CURRENTLY
 #               on (e.g. after a manual /resume) back into the desired file, so the
 #               switch survives the next restart / reboot.
 #   2. ENSURE — (re)create any desired session whose tmux session is MISSING
 #               (e.g. after a reboot). Never kills anything.
 #
-# Desired state: ~/.config/claude-rc/desired   ("name|dir|uuid" per line, # = comment)
+# Desired state: ~/.config/claude-rc/desired  ("name|dir|uuid|mode" per line, # = comment)
+#                mode: rc (default) | telegram | fakechat[:PORT]
 # Run by:        claude-rc-reconcile.timer (systemd --user) + on boot.
 set -u
 
@@ -19,37 +20,45 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:/usr/local/bi
 
 [[ -f "$DESIRED" ]] || exit 0
 
-# upsert "name|dir|uuid" keyed by exact name
+# upsert "name|dir|uuid|mode" keyed by exact name (mode preserved)
 _upsert() {
-  local name="$1" dir="$2" uuid="$3" tmp
+  local name="$1" dir="$2" uuid="$3" mode="$4" tmp
   tmp="$(mktemp)"
-  awk -F'|' -v n="$name" -v d="$dir" -v u="$uuid" '$1==n{next}{print}END{print n"|"d"|"u}' "$DESIRED" > "$tmp"
+  awk -F'|' -v n="$name" -v d="$dir" -v u="$uuid" -v m="$mode" \
+    '$1==n{next}{print}END{print n"|"d"|"u"|"m}' "$DESIRED" > "$tmp"
   mv "$tmp" "$DESIRED"
 }
 
 # --- pass 1: capture manual conversation switches ---------------------------
-# For each live `claude --remote-control NAME ...`, read its current sessionId and
-# re-pin it in desired if it changed (captures a /resume you did by hand).
+# Map a live claude pid to OUR session name via its PARENT (the rc loop, whose
+# cmdline carries the name). Works for every mode — a channel session has no
+# --remote-control arg to parse.
+_name_of_pid() {
+  local pid="$1" ppid parent
+  ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+  [[ -z "$ppid" ]] && return 1
+  parent="$(tr '\0' '\n' < "/proc/$ppid/cmdline" 2>/dev/null)" || return 1
+  grep -q 'claude-rc-loop' <<<"$parent" || return 1
+  # cmdline args: bash <loop> NAME DIR UUID MODE  -> NAME is the arg after the script
+  awk 'p{print; exit} /claude-rc-loop/{p=1}' <<<"$parent"
+}
+
 sync_live_sessions() {
-  local j pid sid name dir pinned i
-  local -a argv
+  local j pid sid name dir pinned mode
   for j in "$HOME"/.claude/sessions/*.json; do
     [[ -e "$j" ]] || continue
     pid="$(basename "$j" .json)"
-    [[ -r "/proc/$pid/cmdline" ]] || continue
-    mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || continue
-    name=""
-    for ((i=0; i<${#argv[@]}; i++)); do
-      [[ "${argv[i]}" == "--remote-control" ]] && { name="${argv[i+1]:-}"; break; }
-    done
+    [[ -r "/proc/$pid/cmdline" ]] && grep -qa claude "/proc/$pid/cmdline" 2>/dev/null || continue
+    name="$(_name_of_pid "$pid")" || continue
     [[ -z "$name" ]] && continue
     sid="$(grep -ao '"sessionId":"[^"]*"' "$j" 2>/dev/null | head -1 | sed 's/.*:"//; s/"$//')"
     [[ -z "$sid" ]] && continue
     pinned="$(awk -F'|' -v n="$name" '$1==n{print $3; exit}' "$DESIRED")"
     dir="$(awk -F'|' -v n="$name" '$1==n{print $2; exit}' "$DESIRED")"
+    mode="$(awk -F'|' -v n="$name" '$1==n{print $4; exit}' "$DESIRED")"
     [[ -z "$dir" ]] && continue            # name not in desired -> not ours to track
     [[ "$pinned" == "$sid" ]] && continue  # already up to date
-    _upsert "$name" "$dir" "$sid"
+    _upsert "$name" "$dir" "$sid" "$mode"
     echo "[reconcile] sync '$name': re-pinned ${pinned:0:8} -> ${sid:0:8} (current conversation captured)"
   done
 }
@@ -71,9 +80,10 @@ uuid_is_live() {
 }
 
 ensure_one() {
-  local name="$1" dir="$2" uuid="$3"
+  local name="$1" dir="$2" uuid="$3" mode="${4:-rc}"
   [[ -z "$name" || -z "$dir" ]] && return 0
   [[ "$name" == \#* ]] && return 0
+  [[ -z "$mode" ]] && mode=rc
   if [[ ! -d "$dir" ]]; then
     echo "[reconcile] skip '$name': dir gone ($dir)"
     return 0
@@ -86,14 +96,14 @@ ensure_one() {
     echo "[reconcile] skip '$name': uuid $uuid already live in another process"
     return 0
   fi
-  echo "[reconcile] (re)start '$name' -> $dir (uuid=${uuid:-none})"
-  tmux -L claude-rc new-session -d -s "$name" -c "$dir" "$LOOP \"$name\" \"$dir\" \"$uuid\""
+  echo "[reconcile] (re)start '$name' [$mode] -> $dir (uuid=${uuid:-none})"
+  tmux -L claude-rc new-session -d -s "$name" -c "$dir" "$LOOP \"$name\" \"$dir\" \"$uuid\" \"$mode\""
 }
 
 sync_live_sessions
 
-while IFS='|' read -r name dir uuid; do
-  ensure_one "$name" "$dir" "${uuid:-}"
+while IFS='|' read -r name dir uuid mode; do
+  ensure_one "$name" "$dir" "${uuid:-}" "${mode:-rc}"
 done < "$DESIRED"
 
 exit 0

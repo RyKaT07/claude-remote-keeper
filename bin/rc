@@ -1,39 +1,50 @@
 #!/usr/bin/env bash
-# rc — manage Claude Code remote-control sessions (tmux + supervisor loop + native RC).
+# rc — manage always-on Claude Code sessions (tmux + supervisor loop).
 #
-# Desired state:  ~/.config/claude-rc/desired   ("name|dir|uuid" per line)
+# Desired state:  ~/.config/claude-rc/desired   ("name|dir|uuid|mode" per line)
 # Kept alive by:  each session's claude-rc-loop + claude-rc-reconcile.timer.
 #
-#   rc up [name]      register cwd + start in RC. If the name is new and the folder
-#                     has past conversations, interactively pick one (or start fresh).
-#   rc up --new [name]  always start a fresh conversation (no picker)
+# MODES — how you reach a session from the phone:
+#   rc                 Remote Control (Anthropic relay). VISIBLE to anyone logged
+#                      into the claude.ai account. Default for work sessions.
+#   fakechat[:PORT]    local web chat on 127.0.0.1:PORT (default 8787).
+#   telegram           chat via your Telegram bot.
+#   Channel modes are NOT registered with the account — invisible in the app.
+#
+#   rc up [--private|--telegram|--fakechat[:PORT]|--rc] [--new] [name]
+#   rc mode [name] [rc|telegram|fakechat[:PORT]]   show or change a session's mode
 #   rc pick [name]    re-point a session to another past conversation
-#                     (no name: pick the session from a list first, then the chat)
-#   rc down [name]    stop & unregister; no name = pick from a list (Tab = multi-select with fzf)
-#   rc ls             list desired sessions: live state + UUID + dir
-#   rc attach [name]  attach to a live session locally; no name = pick from a list (Ctrl-b d detaches)
+#   rc down [name]    stop & unregister; no name = pick from a list (Tab = multi)
+#   rc ls             list sessions: live state + mode + UUID + dir
+#   rc attach [name]  attach to a live session; no name = pick from a list
 #   rc sync           capture each live session's CURRENT conversation into desired
 #   rc reconcile      run the reconciler once (normally automatic)
 set -euo pipefail
 
 DESIRED="${CLAUDE_RC_DESIRED:-$HOME/.config/claude-rc/desired}"
 RECONCILE="$HOME/.local/bin/claude-rc-reconcile"
+DEFAULT_PRIVATE_MODE="fakechat"
 mkdir -p "$(dirname "$DESIRED")"
 touch "$DESIRED"
 
 die() { echo "rc: $*" >&2; exit 1; }
 
-# ---- desired-state helpers --------------------------------------------------
-get_uuid() {  # name -> existing uuid (or empty)
-  awk -F'|' -v n="$1" '$1==n{print $3; exit}' "$DESIRED"
+valid_mode() {
+  case "$1" in rc|telegram|fakechat|fakechat:[0-9]*) return 0;; *) return 1;; esac
 }
-register() {  # name dir uuid — upsert keyed by EXACT name
-  local name="$1" dir="$2" uuid="$3" tmp
+
+# ---- desired-state helpers --------------------------------------------------
+get_field() {  # name fieldno -> value
+  awk -F'|' -v n="$1" -v f="$2" '$1==n{print $f; exit}' "$DESIRED"
+}
+register() {  # name dir uuid mode — upsert keyed by EXACT name
+  local name="$1" dir="$2" uuid="$3" mode="${4:-rc}" tmp
   tmp="$(mktemp)"
-  awk -F'|' -v n="$name" -v d="$dir" -v u="$uuid" '$1==n{next}{print}END{print n"|"d"|"u}' "$DESIRED" > "$tmp"
+  awk -F'|' -v n="$name" -v d="$dir" -v u="$uuid" -v m="$mode" \
+    '$1==n{next}{print}END{print n"|"d"|"u"|"m}' "$DESIRED" > "$tmp"
   mv "$tmp" "$DESIRED"
 }
-unregister() {  # name
+unregister() {
   local name="$1" tmp
   tmp="$(mktemp)"
   awk -F'|' -v n="$name" '$1!=n' "$DESIRED" > "$tmp"
@@ -73,8 +84,7 @@ print(" ".join(txt.split())[:70])
 PY
 }
 
-# Emit "uuid<TAB>display" for past conversations in DIR, newest first (max 50).
-_convo_rows() {
+_convo_rows() {  # "uuid<TAB>display" for past conversations in DIR, newest first
   local dir="$1" proj f uuid when prev
   proj="$HOME/.claude/projects/$(slug_of "$dir")"
   [[ -d "$proj" ]] || return 0
@@ -86,12 +96,10 @@ _convo_rows() {
   done
 }
 
-# Interactively pick a conversation in DIR. Echoes the chosen UUID, empty for
-# "new conversation", and returns 1 if the user cancelled.
-pick_convo() {
+pick_convo() {  # echoes chosen UUID, empty = new conversation, rc 1 = cancelled
   local dir="$1" rows
   rows="$(_convo_rows "$dir")"
-  [[ -z "$rows" ]] && return 0   # nothing to pick -> caller makes a fresh one
+  [[ -z "$rows" ]] && return 0
   if command -v fzf >/dev/null 2>&1; then
     local sel id
     sel="$( { printf '__new__\t✨ start a NEW conversation\n'; printf '%s\n' "$rows"; } \
@@ -103,7 +111,6 @@ pick_convo() {
   else
     local -a ids=("__new__") disp=("✨ start a NEW conversation") id d i choice
     while IFS=$'\t' read -r id d; do ids+=("$id"); disp+=("$d"); done <<< "$rows"
-    echo "Conversations in $dir:" >&2
     for i in "${!disp[@]}"; do printf '  %2d) %s\n' "$i" "${disp[$i]}" >&2; done
     read -rp "Choose [0-$((${#ids[@]}-1))], or blank to cancel: " choice </dev/tty || return 1
     [[ -z "$choice" ]] && return 1
@@ -114,50 +121,13 @@ pick_convo() {
   fi
 }
 
-# ---- start / commands -------------------------------------------------------
-_start_now() {  # name — start it via reconcile if not already live
-  local name="$1"
-  if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then
-    echo "rc: '$name' already live (remote-control)"
-    return 0
-  fi
-  "$RECONCILE" >/dev/null 2>&1 || true
-  sleep 1
-  if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then
-    echo "rc: '$name' is live in remote-control"
-  else
-    echo "rc: '$name' registered but tmux did not start — check: rc reconcile"
-  fi
-}
-
-cmd_up() {
-  local force_new=0
-  [[ "${1:-}" == "--new" || "${1:-}" == "-n" ]] && { force_new=1; shift; }
-  local dir name uuid
-  dir="$(pwd -P)"
-  name="${1:-$(basename "$dir")}"
-  case "$name" in *'|'*) die "name cannot contain '|'";; esac
-  uuid="$(get_uuid "$name")"
-  if [[ -z "$uuid" ]]; then
-    if [[ $force_new -eq 0 && -t 0 && -t 1 ]]; then
-      uuid="$(pick_convo "$dir")" || { echo "rc up: cancelled"; return 1; }
-    fi
-    [[ -z "$uuid" ]] && uuid="$(uuidgen)"
-  fi
-  register "$name" "$dir" "$uuid"
-  echo "rc up: '$name'  ->  $dir   (uuid=${uuid:0:8})"
-  _start_now "$name"
-}
-
-# Interactively choose a registered session. Echoes "name|dir", returns 1 on
-# cancel / none. Auto-selects when there is only one.
-pick_session_from_desired() {
+pick_session_from_desired() {  # echoes "name|dir", rc 1 on cancel/none
   local -a keys=() disp=()
-  local name dir uuid i
-  while IFS='|' read -r name dir uuid; do
+  local name dir uuid mode i
+  while IFS='|' read -r name dir uuid mode; do
     [[ -z "$name" || "$name" == \#* ]] && continue
     keys+=("$name|$dir")
-    disp+=("$(printf '%-22s %-10s %s' "$name" "${uuid:0:8}" "$dir")")
+    disp+=("$(printf '%-22s %-14s %-10s %s' "$name" "${mode:-rc}" "${uuid:0:8}" "$dir")")
   done < "$DESIRED"
   [[ ${#keys[@]} -eq 0 ]] && { echo "rc: no registered sessions (rc up first)" >&2; return 1; }
   [[ ${#keys[@]} -eq 1 ]] && { printf '%s\n' "${keys[0]}"; return 0; }
@@ -176,12 +146,87 @@ pick_session_from_desired() {
   fi
 }
 
+# ---- start / restart --------------------------------------------------------
+_start_now() {
+  local name="$1"
+  if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then
+    echo "rc: '$name' already live"
+    return 0
+  fi
+  "$RECONCILE" >/dev/null 2>&1 || true
+  sleep 1
+  if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then
+    echo "rc: '$name' is live [$(get_field "$name" 4)]"
+  else
+    echo "rc: '$name' registered but tmux did not start — check: rc reconcile"
+  fi
+}
+
+_restart() {  # stop the tmux session so reconcile respawns it with current settings
+  local name="$1"
+  tmux -L claude-rc kill-session -t "=$name" 2>/dev/null || true
+  sleep 1
+  _start_now "$name"
+}
+
+cmd_up() {
+  local force_new=0 mode="" dir name uuid
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --new|-n)      force_new=1; shift ;;
+      --private)     mode="$DEFAULT_PRIVATE_MODE"; shift ;;
+      --telegram)    mode="telegram"; shift ;;
+      --fakechat)    mode="fakechat"; shift ;;
+      --fakechat:*)  mode="${1#--}"; shift ;;
+      --rc)          mode="rc"; shift ;;
+      --) shift; break ;;
+      -*) die "unknown flag '$1'" ;;
+      *) break ;;
+    esac
+  done
+  dir="$(pwd -P)"
+  name="${1:-$(basename "$dir")}"
+  case "$name" in *'|'*) die "name cannot contain '|'";; esac
+  [[ -n "$mode" ]] && { valid_mode "$mode" || die "bad mode '$mode'"; }
+  [[ -z "$mode" ]] && mode="$(get_field "$name" 4)"
+  [[ -z "$mode" ]] && mode="rc"
+
+  uuid="$(get_field "$name" 3)"
+  if [[ -z "$uuid" ]]; then
+    if [[ $force_new -eq 0 && -t 0 && -t 1 ]]; then
+      uuid="$(pick_convo "$dir")" || { echo "rc up: cancelled"; return 1; }
+    fi
+    [[ -z "$uuid" ]] && uuid="$(uuidgen)"
+  fi
+  register "$name" "$dir" "$uuid" "$mode"
+  echo "rc up: '$name' [$mode] -> $dir (uuid=${uuid:0:8})"
+  _start_now "$name"
+}
+
+cmd_mode() {
+  local name="${1:-}" new="${2:-}" sel dir
+  if [[ -z "$name" ]]; then
+    sel="$(pick_session_from_desired)" || { echo "rc mode: cancelled"; return 1; }
+    name="${sel%%|*}"
+  fi
+  dir="$(get_field "$name" 2)"
+  [[ -z "$dir" ]] && die "no such session '$name'"
+  if [[ -z "$new" ]]; then
+    echo "$name: $(get_field "$name" 4 | grep . || echo rc)"
+    return 0
+  fi
+  valid_mode "$new" || die "bad mode '$new' (rc | telegram | fakechat[:PORT])"
+  register "$name" "$dir" "$(get_field "$name" 3)" "$new"
+  echo "rc mode: '$name' -> $new (restarting)"
+  _restart "$name"
+}
+
 cmd_pick() {
   local name dir uuid sel
   if [[ -n "${1:-}" ]]; then
     name="$1"
     case "$name" in *'|'*) die "name cannot contain '|'";; esac
-    dir="$(awk -F'|' -v n="$name" '$1==n{print $2; exit}' "$DESIRED")"
+    dir="$(get_field "$name" 2)"
     [[ -z "$dir" ]] && dir="$(pwd -P)"
   else
     sel="$(pick_session_from_desired)" || { echo "rc pick: cancelled"; return 1; }
@@ -191,8 +236,8 @@ cmd_pick() {
   [[ -n "$(_convo_rows "$dir")" ]] || die "no past conversations in $dir (use: rc up --new \"$name\")"
   uuid="$(pick_convo "$dir")" || { echo "rc pick: cancelled"; return 1; }
   [[ -z "$uuid" ]] && uuid="$(uuidgen)"
-  register "$name" "$dir" "$uuid"
-  echo "rc pick: '$name'  ->  uuid=${uuid:0:8}"
+  register "$name" "$dir" "$uuid" "$(get_field "$name" 4)"
+  echo "rc pick: '$name' -> uuid=${uuid:0:8}"
   _start_now "$name"
 }
 
@@ -209,11 +254,10 @@ _down_one() {
 
 cmd_down() {
   if [[ -n "${1:-}" ]]; then _down_one "$1"; return; fi
-  # no name -> pick which registered session(s) to stop
-  local rows="" name dir uuid
-  while IFS='|' read -r name dir uuid; do
+  local rows="" name dir uuid mode
+  while IFS='|' read -r name dir uuid mode; do
     [[ -z "$name" || "$name" == \#* ]] && continue
-    rows+="$(printf '%-24s %-10s %s' "$name" "${uuid:0:8}" "$dir")"$'\t'"$name"$'\n'
+    rows+="$(printf '%-24s %-14s %-10s %s' "$name" "${mode:-rc}" "${uuid:0:8}" "$dir")"$'\t'"$name"$'\n'
   done < "$DESIRED"
   [[ -z "$rows" ]] && die "no registered sessions"
   local -a chosen=()
@@ -224,45 +268,24 @@ cmd_down() {
     [[ -z "$sel" ]] && { echo "rc down: nothing selected"; return 0; }
     while IFS= read -r line; do chosen+=("${line#*$'\t'}"); done <<< "$sel"
   else
-    local -a keys=() disp=()
-    local d k i input tok
+    local -a keys=() disp=(); local d k i input tok
     while IFS=$'\t' read -r d k; do disp+=("$d"); keys+=("$k"); done < <(printf '%s' "$rows")
     for i in "${!disp[@]}"; do printf '  %2d) %s\n' "$i" "${disp[$i]}" >&2; done
     read -rp "Down which? (numbers, space/comma separated): " input </dev/tty || return 1
-    for tok in ${input//,/ }; do
-      if [[ "$tok" =~ ^[0-9]+$ ]]; then chosen+=("${keys[$tok]}"); fi
-    done
+    for tok in ${input//,/ }; do [[ "$tok" =~ ^[0-9]+$ ]] && chosen+=("${keys[$tok]}"); done
   fi
   [[ ${#chosen[@]} -eq 0 ]] && { echo "rc down: nothing selected"; return 0; }
   for name in "${chosen[@]}"; do _down_one "$name"; done
 }
 
 cmd_ls() {
-  printf '%-26s %-5s %-10s %s\n' NAME LIVE UUID DIR
-  while IFS='|' read -r name dir uuid; do
+  printf '%-24s %-5s %-14s %-10s %s\n' NAME LIVE MODE UUID DIR
+  local name dir uuid mode live
+  while IFS='|' read -r name dir uuid mode; do
     [[ -z "$name" || "$name" == \#* ]] && continue
-    local live
     if tmux -L claude-rc has-session -t "=$name" 2>/dev/null; then live=yes; else live=no; fi
-    printf '%-26s %-5s %-10s %s\n' "$name" "$live" "${uuid:0:8}" "$dir"
+    printf '%-24s %-5s %-14s %-10s %s\n' "$name" "$live" "${mode:-rc}" "${uuid:0:8}" "$dir"
   done < "$DESIRED"
-}
-
-# Interactively choose a live tmux session. Echoes the chosen name, returns 1 on
-# cancel / none.
-pick_live_session() {
-  local live
-  live="$(tmux -L claude-rc list-sessions -F '#S' 2>/dev/null | sort)"
-  [[ -z "$live" ]] && { echo "rc: no live sessions" >&2; return 1; }
-  if command -v fzf >/dev/null 2>&1; then
-    printf '%s\n' "$live" | fzf --height=40% --reverse --prompt="attach to > " || return 1
-  else
-    local -a arr; mapfile -t arr <<< "$live"
-    local i choice
-    for i in "${!arr[@]}"; do printf '  %2d) %s\n' "$i" "${arr[$i]}" >&2; done
-    read -rp "Attach to [0-$((${#arr[@]}-1))]: " choice </dev/tty || return 1
-    [[ "$choice" =~ ^[0-9]+$ ]] || return 1
-    printf '%s\n' "${arr[$choice]:-}"
-  fi
 }
 
 cmd_attach() {
@@ -271,9 +294,17 @@ cmd_attach() {
     local live; live="$(tmux -L claude-rc list-sessions -F '#S' 2>/dev/null)"
     [[ -z "$live" ]] && die "no live sessions (rc up to start one)"
     if [[ "$(printf '%s\n' "$live" | grep -c .)" -eq 1 ]]; then
-      name="$live"                       # only one live -> attach straight away
+      name="$live"
+    elif command -v fzf >/dev/null 2>&1; then
+      name="$(printf '%s\n' "$live" | sort | fzf --height=40% --reverse --prompt='attach to > ')" \
+        || { echo "rc attach: cancelled"; return 1; }
     else
-      name="$(pick_live_session)" || { echo "rc attach: cancelled"; return 1; }
+      local -a arr; mapfile -t arr < <(printf '%s\n' "$live" | sort)
+      local i choice
+      for i in "${!arr[@]}"; do printf '  %2d) %s\n' "$i" "${arr[$i]}" >&2; done
+      read -rp "Attach to [0-$((${#arr[@]}-1))]: " choice </dev/tty || return 1
+      [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+      name="${arr[$choice]:-}"
     fi
     [[ -z "$name" ]] && return 1
   fi
@@ -281,10 +312,11 @@ cmd_attach() {
   exec tmux -L claude-rc attach -t "=$name"
 }
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
   up)             shift; cmd_up "$@";;
+  mode)           shift; cmd_mode "$@";;
   pick)           shift; cmd_pick "$@";;
   down)           shift; cmd_down "$@";;
   ls|list)        cmd_ls;;

@@ -3,7 +3,7 @@
 _rc_complete() {
   local cur subcmds desired names IFS
   cur="${COMP_WORDS[COMP_CWORD]}"
-  subcmds="up pick down ls attach sync reconcile help"
+  subcmds="up mode pick down ls attach sync reconcile help"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "$subcmds" -- "$cur") )
@@ -11,7 +11,7 @@ _rc_complete() {
   fi
 
   case "${COMP_WORDS[1]}" in
-    down|attach|a|pick)
+    down|attach|a|pick|mode)
       # complete with registered session names (spaces escaped)
       desired="${CLAUDE_RC_DESIRED:-$HOME/.config/claude-rc/desired}"
       names="$(awk -F'|' '$1!="" && $1 !~ /^#/ {print $1}' "$desired" 2>/dev/null)"

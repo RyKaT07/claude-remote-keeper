@@ -1,27 +1,51 @@
 #!/usr/bin/env bash
-# claude-rc-loop NAME DIR [UUID]
+# claude-rc-loop NAME DIR [UUID] [MODE]
 #
-# Supervisor loop, run INSIDE a tmux session (one per Claude session). Keeps a
-# Claude Code remote-control session alive forever: restarts on crash, on the
-# ~10min network-timeout exit, or any auth blip. The tmux session itself never
-# dies because this loop outlives the claude process.
+# Supervisor loop, run INSIDE a tmux session (one per Claude session). Keeps the
+# session alive forever: restarts on crash, on the ~10min network-timeout exit,
+# or any auth blip. The tmux session itself never dies because this loop
+# outlives the claude process.
 #
-# UUID pins the conversation so the SAME chat comes back after a reboot:
-#   - transcript exists  -> claude --remote-control "NAME" --resume UUID
-#   - no transcript yet  -> claude --remote-control "NAME" --session-id UUID (pins it)
-#   - no UUID            -> fresh remote-control session
+# MODE decides how you reach the session from a phone:
+#   rc        (default) --remote-control — Anthropic relay; VISIBLE to anyone
+#                       logged into the claude.ai account.
+#   telegram            --channels plugin:telegram@... — chat via Telegram bot;
+#                       NOT registered with the account, so not visible there.
+#   fakechat[:PORT]     --channels plugin:fakechat@... — local web chat on
+#                       127.0.0.1:PORT (default 8787). Also invisible to the
+#                       account. One port per session — set it explicitly if you
+#                       run more than one.
+#
+# UUID pins the conversation so the SAME chat comes back after a reboot.
 set -u
 
-name="${1:?usage: claude-rc-loop NAME DIR [UUID]}"
+name="${1:?usage: claude-rc-loop NAME DIR [UUID] [MODE]}"
 dir="${2:?dir required}"
 uuid="${3:-}"
+mode="${4:-rc}"
 
-# Bypass the workspace-trust prompt that otherwise hangs unattended RC startup
-# under systemd (claude-code issue #53606, affects 2.1.119+).
+# Bypass the workspace-trust prompt that otherwise hangs unattended startup
+# (claude-code issue #53606, affects 2.1.119+).
 export CLAUDE_TRUST_WORKSPACE=1
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 cd "$dir" 2>/dev/null || { echo "[rc-loop] $name: dir gone ($dir) — idling"; exec sleep 3600; }
+
+declare -a MODE_ARGS
+case "${mode:-rc}" in
+  rc|"")
+    MODE_ARGS=(--remote-control "$name") ;;
+  telegram)
+    MODE_ARGS=(--channels plugin:telegram@claude-plugins-official) ;;
+  fakechat|fakechat:*)
+    port="${mode#fakechat}"; port="${port#:}"
+    export FAKECHAT_PORT="${port:-8787}"
+    echo "[rc-loop] $name: fakechat on 127.0.0.1:$FAKECHAT_PORT"
+    MODE_ARGS=(--channels plugin:fakechat@claude-plugins-official) ;;
+  *)
+    echo "[rc-loop] $name: unknown mode '$mode', falling back to remote-control"
+    MODE_ARGS=(--remote-control "$name") ;;
+esac
 
 transcript_exists() { compgen -G "$HOME/.claude/projects/*/$1.jsonl" >/dev/null 2>&1; }
 
@@ -33,14 +57,14 @@ while true; do
     echo "[rc-loop] $name: 'claude' not on PATH, retry in 10s"; sleep 10; continue
   fi
   if [[ -n "$uuid" ]] && transcript_exists "$uuid"; then
-    echo "[rc-loop] $name: start (--resume $uuid)"
-    "$CLAUDE" --remote-control "$name" --resume "$uuid" || true
+    echo "[rc-loop] $name: start ($mode, --resume $uuid)"
+    "$CLAUDE" "${MODE_ARGS[@]}" --resume "$uuid" || true
   elif [[ -n "$uuid" ]]; then
-    echo "[rc-loop] $name: start (--session-id $uuid, new pinned)"
-    "$CLAUDE" --remote-control "$name" --session-id "$uuid" || true
+    echo "[rc-loop] $name: start ($mode, --session-id $uuid, new pinned)"
+    "$CLAUDE" "${MODE_ARGS[@]}" --session-id "$uuid" || true
   else
-    echo "[rc-loop] $name: start (fresh)"
-    "$CLAUDE" --remote-control "$name" || true
+    echo "[rc-loop] $name: start ($mode, fresh)"
+    "$CLAUDE" "${MODE_ARGS[@]}" || true
   fi
   echo "[rc-loop] $name: claude exited, restart in 10s…"
   sleep 10
