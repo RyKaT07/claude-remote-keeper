@@ -8,11 +8,12 @@
 #   rc                 Remote Control (Anthropic relay). VISIBLE to anyone logged
 #                      into the claude.ai account. Default for work sessions.
 #   fakechat[:PORT]    local web chat on 127.0.0.1:PORT (default 8787).
-#   telegram           chat via your Telegram bot.
+#   telegram[:LABEL]   chat via your Telegram bot (one bot per session; LABEL picks
+#                      a separate token dir ~/.claude/channels/telegram-LABEL).
 #   Channel modes are NOT registered with the account — invisible in the app.
 #
 #   rc up [--private|--telegram|--fakechat[:PORT]|--rc] [--new] [name]
-#   rc mode [name] [rc|telegram|fakechat[:PORT]]   show or change a session's mode
+#   rc mode [name] [mode]   change a session mode; anything omitted is asked for
 #   rc pick [name]    re-point a session to another past conversation
 #   rc down [name]    stop & unregister; no name = pick from a list (Tab = multi)
 #   rc ls             list sessions: live state + mode + UUID + dir
@@ -30,7 +31,20 @@ touch "$DESIRED"
 die() { echo "rc: $*" >&2; exit 1; }
 
 valid_mode() {
-  case "$1" in rc|telegram|fakechat|fakechat:[0-9]*) return 0;; *) return 1;; esac
+  case "$1" in rc|telegram|telegram:?*|fakechat|fakechat:[0-9]*) return 0;; *) return 1;; esac
+}
+
+# A channel mode is exclusive: one bot token (telegram) or one port (fakechat)
+# serves exactly one session. Refuse to hand the same slot to two sessions —
+# sharing a telegram token makes the newer session SIGTERM the older one's poller.
+assert_mode_free() {  # mode name-being-set
+  local mode="$1" self="$2" clash
+  [[ "$mode" == rc ]] && return 0
+  clash="$(awk -F'|' -v m="$mode" -v s="$self" '$4==m && $1!=s {print $1; exit}' "$DESIRED")"
+  [[ -z "$clash" ]] && return 0
+  die "mode '$mode' is already used by '$clash' — one bot/port per session.
+     telegram: create a second bot and use  telegram:<label>  (own token in ~/.claude/channels/telegram-<label>/.env)
+     fakechat: pick another port, e.g.  fakechat:8801"
 }
 
 # ---- desired-state helpers --------------------------------------------------
@@ -121,6 +135,31 @@ pick_convo() {  # echoes chosen UUID, empty = new conversation, rc 1 = cancelled
   fi
 }
 
+pick_mode() {  # echoes chosen mode, rc 1 on cancel
+  local rows sel m port
+  rows="Remote Control — reachable from the Claude app; VISIBLE to anyone logged into the account"$'\t'"rc"$'\n'
+  rows+="Telegram — chat via your bot; not registered with the account"$'\t'"telegram"$'\n'
+  rows+="fakechat — local web chat on 127.0.0.1; not registered with the account"$'\t'"fakechat"$'\n'
+  if command -v fzf >/dev/null 2>&1; then
+    sel="$(printf '%s' "$rows" | fzf --with-nth=1 --delimiter='\t' --height=30% --reverse --no-sort --prompt='mode > ')" || return 1
+    m="${sel#*$'\t'}"
+  else
+    local -a vals=() disp=(); local d v i choice
+    while IFS=$'\t' read -r d v; do disp+=("$d"); vals+=("$v"); done < <(printf '%s' "$rows")
+    for i in "${!disp[@]}"; do printf '  %2d) %s\n' "$i" "${disp[$i]}" >&2; done
+    read -rp "Mode [0-$((${#vals[@]}-1))]: " choice </dev/tty || return 1
+    [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+    m="${vals[$choice]:-}"
+  fi
+  [[ -z "$m" ]] && return 1
+  if [[ "$m" == fakechat ]]; then
+    # one port per session — ask, because a second fakechat on 8787 will not start
+    read -rp "fakechat port [8787]: " port </dev/tty || true
+    [[ -n "${port:-}" ]] && m="fakechat:$port"
+  fi
+  printf '%s\n' "$m"
+}
+
 pick_session_from_desired() {  # echoes "name|dir", rc 1 on cancel/none
   local -a keys=() disp=()
   local name dir uuid mode i
@@ -188,8 +227,14 @@ cmd_up() {
   name="${1:-$(basename "$dir")}"
   case "$name" in *'|'*) die "name cannot contain '|'";; esac
   [[ -n "$mode" ]] && { valid_mode "$mode" || die "bad mode '$mode'"; }
-  [[ -z "$mode" ]] && mode="$(get_field "$name" 4)"
-  [[ -z "$mode" ]] && mode="rc"
+  [[ -z "$mode" ]] && mode="$(get_field "$name" 4)"   # existing session keeps its mode
+  if [[ -z "$mode" ]]; then                           # new session: ask, don't assume
+    if [[ -t 0 && -t 1 ]]; then
+      mode="$(pick_mode)" || { echo "rc up: cancelled"; return 1; }
+    else
+      mode="rc"
+    fi
+  fi
 
   uuid="$(get_field "$name" 3)"
   if [[ -z "$uuid" ]]; then
@@ -198,13 +243,19 @@ cmd_up() {
     fi
     [[ -z "$uuid" ]] && uuid="$(uuidgen)"
   fi
+  assert_mode_free "$mode" "$name"
   register "$name" "$dir" "$uuid" "$mode"
   echo "rc up: '$name' [$mode] -> $dir (uuid=${uuid:0:8})"
   _start_now "$name"
 }
 
 cmd_mode() {
-  local name="${1:-}" new="${2:-}" sel dir
+  # Args may come in either order and either may be omitted — whatever is missing
+  # is asked for interactively: `rc mode`, `rc mode telegram`, `rc mode "Name"`.
+  local name="" new="" a sel dir
+  for a in "$@"; do
+    if valid_mode "$a"; then new="$a"; else name="$a"; fi
+  done
   if [[ -z "$name" ]]; then
     sel="$(pick_session_from_desired)" || { echo "rc mode: cancelled"; return 1; }
     name="${sel%%|*}"
@@ -212,10 +263,11 @@ cmd_mode() {
   dir="$(get_field "$name" 2)"
   [[ -z "$dir" ]] && die "no such session '$name'"
   if [[ -z "$new" ]]; then
-    echo "$name: $(get_field "$name" 4 | grep . || echo rc)"
-    return 0
+    echo "current: ${name} [$(get_field "$name" 4 | grep . || echo rc)]" >&2
+    new="$(pick_mode)" || { echo "rc mode: cancelled"; return 1; }
   fi
-  valid_mode "$new" || die "bad mode '$new' (rc | telegram | fakechat[:PORT])"
+  valid_mode "$new" || die "bad mode '$new' (rc | telegram[:LABEL] | fakechat[:PORT])"
+  assert_mode_free "$new" "$name"
   register "$name" "$dir" "$(get_field "$name" 3)" "$new"
   echo "rc mode: '$name' -> $new (restarting)"
   _restart "$name"

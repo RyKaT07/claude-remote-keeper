@@ -35,7 +35,15 @@ declare -a MODE_ARGS
 case "${mode:-rc}" in
   rc|"")
     MODE_ARGS=(--remote-control "$name") ;;
-  telegram)
+  telegram|telegram:*)
+    # Telegram allows exactly ONE getUpdates consumer per bot token, and the
+    # plugin SIGTERMs whoever held the slot before. So a second session sharing
+    # a token silently kills the first: one bot (and one state dir) per session.
+    label="${mode#telegram}"; label="${label#:}"
+    if [[ -n "$label" ]]; then
+      export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-$label"
+      echo "[rc-loop] $name: telegram state dir $TELEGRAM_STATE_DIR (needs its own bot token)"
+    fi
     MODE_ARGS=(--channels plugin:telegram@claude-plugins-official) ;;
   fakechat|fakechat:*)
     port="${mode#fakechat}"; port="${port#:}"
