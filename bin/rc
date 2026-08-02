@@ -18,6 +18,8 @@
 #   rc down [name]    stop & unregister; no name = pick from a list (Tab = multi)
 #   rc ls             list sessions: live state + mode + UUID + dir
 #   rc attach [name]  attach to a live session; no name = pick from a list
+#   rc bots           list Telegram bot slots: which are free, which session uses which
+#   rc bot add [label]  register a new bot token as a slot (telegram:<label>)
 #   rc sync           capture each live session's CURRENT conversation into desired
 #   rc reconcile      run the reconciler once (normally automatic)
 set -euo pipefail
@@ -45,6 +47,59 @@ assert_mode_free() {  # mode name-being-set
   die "mode '$mode' is already used by '$clash' — one bot/port per session.
      telegram: create a second bot and use  telegram:<label>  (own token in ~/.claude/channels/telegram-<label>/.env)
      fakechat: pick another port, e.g.  fakechat:8801"
+}
+
+# ---- telegram bot pool ------------------------------------------------------
+# One bot token serves one session (Telegram allows a single getUpdates consumer
+# per token), and each token lives in its own state dir — so the dirs ARE the pool:
+#   ~/.claude/channels/telegram/.env           -> mode "telegram"
+#   ~/.claude/channels/telegram-<label>/.env   -> mode "telegram:<label>"
+# A slot is free when no line in the desired file claims it, so `rc down` releases
+# a bot automatically and the next `rc up --telegram` reuses it.
+_slot_dir() {
+  case "$1" in
+    telegram)   printf '%s\n' "$HOME/.claude/channels/telegram" ;;
+    telegram:*) printf '%s\n' "$HOME/.claude/channels/telegram-${1#telegram:}" ;;
+    *) return 1 ;;
+  esac
+}
+telegram_slots() {  # every slot that actually holds a token
+  local d label
+  [[ -s "$HOME/.claude/channels/telegram/.env" ]] && echo "telegram"
+  for d in "$HOME"/.claude/channels/telegram-*/; do
+    [[ -s "$d/.env" ]] || continue
+    label="$(basename "$d")"
+    echo "telegram:${label#telegram-}"
+  done
+  return 0
+}
+slot_owner() { awk -F'|' -v m="$1" '$4==m{print $1; exit}' "$DESIRED"; }
+free_telegram_slot() {
+  local s
+  while read -r s; do
+    [[ -z "$s" ]] && continue
+    [[ -z "$(slot_owner "$s")" ]] && { printf '%s\n' "$s"; return 0; }
+  done < <(telegram_slots)
+  return 1
+}
+_bot_token() { grep -m1 '^TELEGRAM_BOT_TOKEN=' "$(_slot_dir "$1")/.env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]'; }
+_bot_rename() {  # mode session-name — best effort, keeps the bot named after its session
+  local t; t="$(_bot_token "$1")" || return 0
+  [[ -z "$t" ]] && return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  curl -s --max-time 10 -X POST "https://api.telegram.org/bot${t}/setMyName" \
+       --data-urlencode "name=$2" >/dev/null 2>&1 || true
+}
+# Bare "telegram" means "any free bot" — resolve it to a concrete slot.
+resolve_telegram() {  # requested-mode name-being-set -> concrete mode
+  local want="$1" self="$2" cur free
+  [[ "$want" != telegram ]] && { printf '%s\n' "$want"; return 0; }
+  cur="$(slot_owner telegram)"
+  [[ -z "$cur" || "$cur" == "$self" ]] && { echo telegram; return 0; }
+  free="$(free_telegram_slot)" || die "all Telegram bots are taken:
+$(cmd_bots_lines)
+     Add one:  BotFather /newbot  ->  rc bot add <label>"
+  printf '%s\n' "$free"
 }
 
 # ---- desired-state helpers --------------------------------------------------
@@ -243,8 +298,10 @@ cmd_up() {
     fi
     [[ -z "$uuid" ]] && uuid="$(uuidgen)"
   fi
+  mode="$(resolve_telegram "$mode" "$name")"
   assert_mode_free "$mode" "$name"
   register "$name" "$dir" "$uuid" "$mode"
+  [[ "$mode" == telegram* ]] && _bot_rename "$mode" "$name"
   echo "rc up: '$name' [$mode] -> $dir (uuid=${uuid:0:8})"
   _start_now "$name"
 }
@@ -267,8 +324,10 @@ cmd_mode() {
     new="$(pick_mode)" || { echo "rc mode: cancelled"; return 1; }
   fi
   valid_mode "$new" || die "bad mode '$new' (rc | telegram[:LABEL] | fakechat[:PORT])"
+  new="$(resolve_telegram "$new" "$name")"
   assert_mode_free "$new" "$name"
   register "$name" "$dir" "$(get_field "$name" 3)" "$new"
+  [[ "$new" == telegram* ]] && _bot_rename "$new" "$name"
   echo "rc mode: '$name' -> $new (restarting)"
   _restart "$name"
 }
@@ -364,6 +423,53 @@ cmd_attach() {
   exec tmux -L claude-rc attach -t "=$name"
 }
 
+cmd_bots_lines() {
+  local s owner tok name
+  while read -r s; do
+    [[ -z "$s" ]] && continue
+    owner="$(slot_owner "$s")"
+    tok="$(_bot_token "$s")"
+    name="?"
+    if [[ -n "$tok" ]] && command -v curl >/dev/null 2>&1; then
+      name="$(curl -s --max-time 8 "https://api.telegram.org/bot${tok}/getMe" 2>/dev/null \
+              | sed -n 's/.*"username":"\([^"]*\)".*/@\1/p' | head -1)"
+      [[ -z "$name" ]] && name="(unreachable)"
+    fi
+    printf '     %-22s %-30s %s\n' "$s" "$name" "${owner:-FREE}"
+  done < <(telegram_slots)
+}
+
+cmd_bots() {
+  printf '%-22s %-30s %s\n' SLOT BOT 'USED BY'
+  cmd_bots_lines | sed 's/^     //'
+}
+
+cmd_bot() {
+  local sub="${1:-}" label="${2:-}" dir tok
+  case "$sub" in
+    add)
+      [[ -z "$label" ]] && { read -rp "label for the new bot (e.g. banking): " label </dev/tty; }
+      [[ "$label" =~ ^[a-z0-9-]+$ ]] || die "label must be lowercase letters/digits/dashes"
+      dir="$HOME/.claude/channels/telegram-$label"
+      [[ -s "$dir/.env" ]] && die "slot telegram:$label already has a token"
+      mkdir -p "$dir"; chmod 700 "$dir"
+      echo "Create the bot first: Telegram -> @BotFather -> /newbot" >&2
+      read -rsp "Paste its token: " tok </dev/tty; echo >&2
+      [[ "$tok" =~ ^[0-9]{6,}:[A-Za-z0-9_-]{30,}$ ]] || die "that does not look like a bot token"
+      printf 'TELEGRAM_BOT_TOKEN=%s\n' "$tok" > "$dir/.env"; chmod 600 "$dir/.env"
+      if command -v curl >/dev/null 2>&1; then
+        curl -s --max-time 10 "https://api.telegram.org/bot${tok}/getMe" \
+          | grep -q '"ok":true' && echo "✔ token works — slot ready: telegram:$label" \
+          || { rm -f "$dir/.env"; die "Telegram rejected that token"; }
+      else
+        echo "slot ready: telegram:$label (could not verify, no curl)"
+      fi
+      ;;
+    ls|"") cmd_bots ;;
+    *) die "usage: rc bot add [label] | rc bots" ;;
+  esac
+}
+
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-}" in
@@ -373,6 +479,8 @@ case "${1:-}" in
   down)           shift; cmd_down "$@";;
   ls|list)        cmd_ls;;
   attach|a)       shift; cmd_attach "$@";;
+  bots)           cmd_bots;;
+  bot)            shift; cmd_bot "$@";;
   sync|reconcile) exec "$RECONCILE";;
   ""|-h|--help|help) usage;;
   *) die "unknown command '$1' (try: rc --help)";;
