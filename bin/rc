@@ -7,6 +7,7 @@
 # MODES — how you reach a session from the phone:
 #   rc                 Remote Control (Anthropic relay). VISIBLE to anyone logged
 #                      into the claude.ai account. Default for work sessions.
+#   local              terminal-only (tmux/iTerm); no app, no bot.
 #   fakechat[:PORT]    local web chat on 127.0.0.1:PORT (default 8787).
 #   telegram[:LABEL]   chat via your Telegram bot (one bot per session; LABEL picks
 #                      a separate token dir ~/.claude/channels/telegram-LABEL).
@@ -33,7 +34,7 @@ touch "$DESIRED"
 die() { echo "rc: $*" >&2; exit 1; }
 
 valid_mode() {
-  case "$1" in rc|telegram|telegram:?*|fakechat|fakechat:[0-9]*) return 0;; *) return 1;; esac
+  case "$1" in rc|local|telegram|telegram:?*|fakechat|fakechat:[0-9]*) return 0;; *) return 1;; esac
 }
 
 # A channel mode is exclusive: one bot token (telegram) or one port (fakechat)
@@ -41,7 +42,7 @@ valid_mode() {
 # sharing a telegram token makes the newer session SIGTERM the older one's poller.
 assert_mode_free() {  # mode name-being-set
   local mode="$1" self="$2" clash
-  [[ "$mode" == rc ]] && return 0
+  [[ "$mode" == rc || "$mode" == local ]] && return 0
   clash="$(awk -F'|' -v m="$mode" -v s="$self" '$4==m && $1!=s {print $1; exit}' "$DESIRED")"
   [[ -z "$clash" ]] && return 0
   die "mode '$mode' is already used by '$clash' — one bot/port per session.
@@ -193,6 +194,7 @@ pick_convo() {  # echoes chosen UUID, empty = new conversation, rc 1 = cancelled
 pick_mode() {  # echoes chosen mode, rc 1 on cancel
   local rows sel m port
   rows="Remote Control — reachable from the Claude app; VISIBLE to anyone logged into the account"$'\t'"rc"$'\n'
+  rows+="local — terminal only (tmux/iTerm); no app, no bot, invisible everywhere"$'\t'"local"$'\n'
   rows+="Telegram — chat via your bot; not registered with the account"$'\t'"telegram"$'\n'
   rows+="fakechat — local web chat on 127.0.0.1; not registered with the account"$'\t'"fakechat"$'\n'
   if command -v fzf >/dev/null 2>&1; then
@@ -273,6 +275,7 @@ cmd_up() {
       --fakechat)    mode="fakechat"; shift ;;
       --fakechat:*)  mode="${1#--}"; shift ;;
       --rc)          mode="rc"; shift ;;
+      --local)       mode="local"; shift ;;
       --) shift; break ;;
       -*) die "unknown flag '$1'" ;;
       *) break ;;
