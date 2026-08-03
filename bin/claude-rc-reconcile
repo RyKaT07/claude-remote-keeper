@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # claude-rc-reconcile — keep desired Claude sessions in sync.
 #
-# Two passes:
+# Three passes:
 #   1. SYNC   — for each live session, capture the conversation it is CURRENTLY
 #               on (e.g. after a manual /resume) back into the desired file, so the
 #               switch survives the next restart / reboot.
 #   2. ENSURE — (re)create any desired session whose tmux session is MISSING
-#               (e.g. after a reboot). Never kills anything.
+#               (e.g. after a reboot).
+#   3. CHANNEL — a telegram session whose bot poller died goes SILENT while the
+#               tmux session still looks perfectly alive: rc ls says "yes", the
+#               phone just stops receiving. Restart those (pass 2 recreates them).
 #
 # Desired state: ~/.config/claude-rc/desired  ("name|dir|uuid|mode" per line, # = comment)
 #                mode: rc (default) | telegram | fakechat[:PORT]
@@ -100,10 +103,51 @@ ensure_one() {
   tmux -L claude-rc new-session -d -s "$name" -c "$dir" "$LOOP \"$name\" \"$dir\" \"$uuid\" \"$mode\""
 }
 
+
+# --- pass 3: channel health -------------------------------------------------
+# The plugin's MCP server can die without taking the claude process with it, so
+# the session looks healthy while its Telegram channel is gone. Detect and
+# restart. GRACE gives a freshly (re)started session time to bring the poller up.
+CHANNEL_GRACE=180
+
+channel_health() {
+  local name dir uuid mode slot pid created age now
+  now=$(date +%s)
+  while IFS='|' read -r name dir uuid mode; do
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    case "${mode:-}" in telegram|telegram:*) ;; *) continue ;; esac
+    tmux -L claude-rc has-session -t "=$name" 2>/dev/null || continue
+
+    # display-message -t returns empty here, so read creation time from list-sessions
+    created=$(tmux -L claude-rc list-sessions -F '#{session_name}|#{session_created}' 2>/dev/null \
+              | awk -F'|' -v n="$name" '$1==n{print $2; exit}')
+    [[ -z "$created" ]] && continue
+    age=$(( now - created ))
+    (( age < CHANNEL_GRACE )) && continue
+
+    slot="$HOME/.claude/channels/telegram"
+    [[ "$mode" == telegram:* ]] && slot="$HOME/.claude/channels/telegram-${mode#telegram:}"
+    # No token => no poller is expected (the default slot is a deliberate decoy);
+    # restarting would loop forever, so leave it alone.
+    [[ -s "$slot/.env" ]] || continue
+
+    pid=$(cat "$slot/bot.pid" 2>/dev/null)
+    # ponytail: verify the pid is really the poller — a recycled pid would read as alive.
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
+       && grep -qa 'server\.ts' "/proc/$pid/cmdline" 2>/dev/null; then
+      continue
+    fi
+    echo "[reconcile] '$name': telegram channel dead ($mode) — restarting session"
+    tmux -L claude-rc kill-session -t "=$name" 2>/dev/null
+  done < "$DESIRED"
+}
+
 sync_live_sessions
 
 while IFS='|' read -r name dir uuid mode; do
   ensure_one "$name" "$dir" "${uuid:-}" "${mode:-rc}"
 done < "$DESIRED"
+
+channel_health
 
 exit 0
