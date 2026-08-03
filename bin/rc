@@ -284,6 +284,9 @@ cmd_up() {
   dir="$(pwd -P)"
   name="${1:-$(basename "$dir")}"
   case "$name" in *'|'*) die "name cannot contain '|'";; esac
+  # tmux silently mangles '.' to '_' in session names, so exact-match lookups
+  # (has-session/kill-session) would never find the session again.
+  case "$name" in *.*) die "name cannot contain '.' (tmux rewrites it to '_')";; esac
   [[ -n "$mode" ]] && { valid_mode "$mode" || die "bad mode '$mode'"; }
   [[ -z "$mode" ]] && mode="$(get_field "$name" 4)"   # existing session keeps its mode
   if [[ -z "$mode" ]]; then                           # new session: ask, don't assume
