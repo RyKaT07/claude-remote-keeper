@@ -96,7 +96,11 @@ resolve_telegram() {  # requested-mode name-being-set -> concrete mode
   local want="$1" self="$2" cur free
   [[ "$want" != telegram ]] && { printf '%s\n' "$want"; return 0; }
   cur="$(slot_owner telegram)"
-  [[ -z "$cur" || "$cur" == "$self" ]] && { echo telegram; return 0; }
+  # Only hand out the default slot if it actually holds a token — it is kept
+  # deliberately empty as a decoy, and a session pointed at it never gets a poller.
+  if [[ -s "$HOME/.claude/channels/telegram/.env" ]] && [[ -z "$cur" || "$cur" == "$self" ]]; then
+    echo telegram; return 0
+  fi
   free="$(free_telegram_slot)" || die "all Telegram bots are taken:
 $(cmd_bots_lines)
      Add one:  BotFather /newbot  ->  rc bot add <label>"
