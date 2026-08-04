@@ -139,6 +139,9 @@ channel_health() {
     fi
     echo "[reconcile] '$name': telegram channel dead ($mode) — restarting session"
     tmux -L claude-rc kill-session -t "=$name" 2>/dev/null
+    # Recreate in the SAME pass: relying on the next tick leaves the session dead
+    # if the timer is stopped in between, which is how a live chat once vanished.
+    ensure_one "$name" "$dir" "$uuid" "$mode"
   done < "$DESIRED"
 }
 
